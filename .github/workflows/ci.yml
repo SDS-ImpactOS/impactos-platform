@@ -1,0 +1,114 @@
+
+name: SDS ImpactOS - Central CI
+
+on:
+  workflow_dispatch:
+    inputs:
+      backend_ref:
+        description: "Branche ou tag du backend"
+        required: true
+        default: develop
+      frontend_ref:
+        description: "Branche ou tag du frontend"
+        required: true
+        default: develop
+
+  repository_dispatch:
+    types:
+      - backend_changed
+      - frontend_changed
+
+permissions:
+  contents: read
+
+concurrency:
+  group: impactos-central-ci
+  cancel-in-progress: true
+
+jobs:
+  test:
+    name: Test Backend and Frontend
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout central repository
+        uses: actions/checkout@v4
+
+      - name: Checkout backend
+        uses: actions/checkout@v4
+        with:
+          repository: SDS-ImpactOS/impactos-backend
+          ref: ${{ github.event.client_payload.ref || inputs.backend_ref || 'develop' }}
+          token: ${{ secrets.IMPACTOS_GITHUB_TOKEN }}
+          path: source/backend
+
+      - name: Checkout frontend
+        uses: actions/checkout@v4
+        with:
+          repository: SDS-ImpactOS/impactos-frontend
+          ref: ${{ github.event.client_payload.ref || inputs.frontend_ref || 'develop' }}
+          token: ${{ secrets.IMPACTOS_GITHUB_TOKEN }}
+          path: source/frontend
+
+      # BACKEND
+      - name: Setup PHP
+        uses: shivammathur/setup-php@v2
+        with:
+          php-version: '8.3'
+          extensions: mbstring, pdo, pdo_sqlite, bcmath, xml, curl, zip, intl
+          coverage: none
+
+      - name: Install backend dependencies
+        working-directory: source/backend
+        run: composer install --no-interaction --prefer-dist --no-progress
+
+      - name: Prepare Laravel environment
+        working-directory: source/backend
+        run: |
+          cp .env.example .env
+          php artisan key:generate
+
+      - name: Run Laravel tests
+        working-directory: source/backend
+        env:
+          APP_ENV: testing
+          DB_CONNECTION: sqlite
+          DB_DATABASE: ":memory:"
+        run: php artisan test
+
+      - name: Check Laravel code style
+        working-directory: source/backend
+        run: |
+          if [ -x vendor/bin/pint ]; then
+            vendor/bin/pint --test
+          fi
+
+      # FRONTEND
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: source/frontend/package-lock.json
+
+      - name: Install frontend dependencies
+        working-directory: source/frontend
+        run: npm ci
+
+      - name: Check TypeScript
+        working-directory: source/frontend
+        run: npx tsc --noEmit
+
+      - name: Run ESLint
+        working-directory: source/frontend
+        run: npm run lint --if-present
+
+      - name: Run frontend tests
+        working-directory: source/frontend
+        run: npm run test --if-present -- --run
+
+      - name: Build frontend
+        working-directory: source/frontend
+        env:
+          VITE_API_URL: https://api-staging.example.com
+        run: npm run build
