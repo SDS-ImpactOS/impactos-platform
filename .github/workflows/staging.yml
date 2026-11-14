@@ -1,0 +1,135 @@
+
+name: SDS ImpactOS - Staging
+
+on:
+  workflow_dispatch:
+    inputs:
+      backend_ref:
+        description: "Branche ou tag du backend"
+        required: true
+        default: develop
+      frontend_ref:
+        description: "Branche ou tag du frontend"
+        required: true
+        default: develop
+
+permissions:
+  contents: read
+
+concurrency:
+  group: impactos-staging
+  cancel-in-progress: true
+
+jobs:
+  deploy:
+    name: Deploy Backend and Frontend to Staging
+    runs-on: ubuntu-latest
+    environment: staging
+
+    steps:
+      - name: Checkout backend
+        uses: actions/checkout@v4
+        with:
+          repository: SDS-ImpactOS/impactos-backend
+          ref: ${{ inputs.backend_ref }}
+          token: ${{ secrets.IMPACTOS_GITHUB_TOKEN }}
+          path: source/backend
+
+      - name: Checkout frontend
+        uses: actions/checkout@v4
+        with:
+          repository: SDS-ImpactOS/impactos-frontend
+          ref: ${{ inputs.frontend_ref }}
+          token: ${{ secrets.IMPACTOS_GITHUB_TOKEN }}
+          path: source/frontend
+
+      # BACKEND BUILD
+      - name: Setup PHP
+        uses: shivammathur/setup-php@v2
+        with:
+          php-version: '8.3'
+          extensions: mbstring, pdo, pdo_pgsql, bcmath, xml, curl, zip, intl
+          coverage: none
+
+      - name: Install backend dependencies
+        working-directory: source/backend
+        run: composer install --no-interaction --prefer-dist --no-dev --optimize-autoloader
+
+      # FRONTEND BUILD
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: source/frontend/package-lock.json
+
+      - name: Install frontend dependencies
+        working-directory: source/frontend
+        run: npm ci
+
+      - name: Build frontend
+        working-directory: source/frontend
+        env:
+          VITE_API_URL: ${{ secrets.VITE_STAGING_API_URL }}
+        run: npm run build
+
+      # SSH
+      - name: Configure SSH
+        env:
+          SSH_PRIVATE_KEY: ${{ secrets.SSH_PRIVATE_KEY }}
+          SSH_KNOWN_HOSTS: ${{ secrets.SSH_KNOWN_HOSTS }}
+        run: |
+          mkdir -p ~/.ssh
+          chmod 700 ~/.ssh
+          printf '%s\n' "$SSH_PRIVATE_KEY" > ~/.ssh/id_ed25519
+          chmod 600 ~/.ssh/id_ed25519
+          printf '%s\n' "$SSH_KNOWN_HOSTS" > ~/.ssh/known_hosts
+          chmod 600 ~/.ssh/known_hosts
+
+      - name: Prepare staging directories
+        env:
+          SSH_HOST: ${{ secrets.SSH_HOST }}
+          SSH_USER: ${{ secrets.SSH_USER }}
+          SSH_PORT: ${{ secrets.SSH_PORT }}
+          BACKEND_PATH: ${{ secrets.BACKEND_STAGING_PATH }}
+          FRONTEND_PATH: ${{ secrets.FRONTEND_STAGING_PATH }}
+        run: |
+          ssh -p "$SSH_PORT" "$SSH_USER@$SSH_HOST" \
+            "mkdir -p '$BACKEND_PATH' '$FRONTEND_PATH'"
+
+      - name: Deploy backend
+        env:
+          SSH_HOST: ${{ secrets.SSH_HOST }}
+          SSH_USER: ${{ secrets.SSH_USER }}
+          SSH_PORT: ${{ secrets.SSH_PORT }}
+          BACKEND_PATH: ${{ secrets.BACKEND_STAGING_PATH }}
+        run: |
+          rsync -az --delete \
+            --exclude='.env' \
+            --exclude='storage/' \
+            --exclude='.git/' \
+            -e "ssh -p $SSH_PORT" \
+            source/backend/ "$SSH_USER@$SSH_HOST:$BACKEND_PATH/"
+
+      - name: Run backend migrations
+        env:
+          SSH_HOST: ${{ secrets.SSH_HOST }}
+          SSH_USER: ${{ secrets.SSH_USER }}
+          SSH_PORT: ${{ secrets.SSH_PORT }}
+          BACKEND_PATH: ${{ secrets.BACKEND_STAGING_PATH }}
+        run: |
+          ssh -p "$SSH_PORT" "$SSH_USER@$SSH_HOST" \
+            "cd '$BACKEND_PATH' &&
+             php artisan migrate --force &&
+             php artisan optimize"
+
+      - name: Deploy frontend
+        env:
+          SSH_HOST: ${{ secrets.SSH_HOST }}
+          SSH_USER: ${{ secrets.SSH_USER }}
+          SSH_PORT: ${{ secrets.SSH_PORT }}
+          FRONTEND_PATH: ${{ secrets.FRONTEND_STAGING_PATH }}
+        run: |
+          rsync -az --delete \
+            -e "ssh -p $SSH_PORT" \
+            source/frontend/dist/ "$SSH_USER@$SSH_HOST:$FRONTEND_PATH/"
