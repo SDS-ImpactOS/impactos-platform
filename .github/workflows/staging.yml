@@ -1,15 +1,10 @@
-
 name: SDS ImpactOS - Staging
 
 on:
   workflow_dispatch:
     inputs:
-      backend_ref:
-        description: "Branche ou tag du backend"
-        required: true
-        default: develop
-      frontend_ref:
-        description: "Branche ou tag du frontend"
+      ref:
+        description: "Branche ou tag à déployer en staging"
         required: true
         default: develop
 
@@ -22,58 +17,65 @@ concurrency:
 
 jobs:
   deploy:
-    name: Deploy Backend and Frontend to Staging
+    name: Build and Deploy to Staging
     runs-on: ubuntu-latest
     environment: staging
 
     steps:
-      - name: Checkout backend
+      - name: Checkout monorepo
         uses: actions/checkout@v4
         with:
-          repository: SDS-ImpactOS/impactos-backend
-          ref: ${{ inputs.backend_ref }}
-          token: ${{ secrets.IMPACTOS_GITHUB_TOKEN }}
-          path: source/backend
-
-      - name: Checkout frontend
-        uses: actions/checkout@v4
-        with:
-          repository: SDS-ImpactOS/impactos-frontend
-          ref: ${{ inputs.frontend_ref }}
-          token: ${{ secrets.IMPACTOS_GITHUB_TOKEN }}
-          path: source/frontend
+          ref: ${{ inputs.ref }}
 
       # BACKEND BUILD
       - name: Setup PHP
         uses: shivammathur/setup-php@v2
         with:
-          php-version: '8.3'
+          php-version: "8.3"
           extensions: mbstring, pdo, pdo_pgsql, bcmath, xml, curl, zip, intl
           coverage: none
 
       - name: Install backend dependencies
-        working-directory: source/backend
+        working-directory: impactos-backend
         run: composer install --no-interaction --prefer-dist --no-dev --optimize-autoloader
 
       # FRONTEND BUILD
       - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
-          node-version: '22'
+          node-version: "22"
           cache: npm
-          cache-dependency-path: source/frontend/package-lock.json
+          cache-dependency-path: impactos-frontend/package-lock.json
 
       - name: Install frontend dependencies
-        working-directory: source/frontend
+        working-directory: impactos-frontend
         run: npm ci
 
       - name: Build frontend
-        working-directory: source/frontend
+        working-directory: impactos-frontend
         env:
           VITE_API_URL: ${{ secrets.VITE_STAGING_API_URL }}
-        run: npm run build
+        run: |
+          test -n "$VITE_API_URL" || { echo "VITE_STAGING_API_URL is missing"; exit 1; }
+          npm run build
 
       # SSH
+      - name: Validate deployment secrets
+        env:
+          SSH_HOST: ${{ secrets.SSH_HOST }}
+          SSH_USER: ${{ secrets.SSH_USER }}
+          SSH_PRIVATE_KEY: ${{ secrets.SSH_PRIVATE_KEY }}
+          SSH_KNOWN_HOSTS: ${{ secrets.SSH_KNOWN_HOSTS }}
+          BACKEND_PATH: ${{ secrets.BACKEND_STAGING_PATH }}
+          FRONTEND_PATH: ${{ secrets.FRONTEND_STAGING_PATH }}
+        run: |
+          for name in SSH_HOST SSH_USER SSH_PRIVATE_KEY SSH_KNOWN_HOSTS BACKEND_PATH FRONTEND_PATH; do
+            if [ -z "${!name}" ]; then
+              echo "Required secret is missing: $name"
+              exit 1
+            fi
+          done
+
       - name: Configure SSH
         env:
           SSH_PRIVATE_KEY: ${{ secrets.SSH_PRIVATE_KEY }}
@@ -90,7 +92,7 @@ jobs:
         env:
           SSH_HOST: ${{ secrets.SSH_HOST }}
           SSH_USER: ${{ secrets.SSH_USER }}
-          SSH_PORT: ${{ secrets.SSH_PORT }}
+          SSH_PORT: ${{ secrets.SSH_PORT || '22' }}
           BACKEND_PATH: ${{ secrets.BACKEND_STAGING_PATH }}
           FRONTEND_PATH: ${{ secrets.FRONTEND_STAGING_PATH }}
         run: |
@@ -101,7 +103,7 @@ jobs:
         env:
           SSH_HOST: ${{ secrets.SSH_HOST }}
           SSH_USER: ${{ secrets.SSH_USER }}
-          SSH_PORT: ${{ secrets.SSH_PORT }}
+          SSH_PORT: ${{ secrets.SSH_PORT || '22' }}
           BACKEND_PATH: ${{ secrets.BACKEND_STAGING_PATH }}
         run: |
           rsync -az --delete \
@@ -109,13 +111,13 @@ jobs:
             --exclude='storage/' \
             --exclude='.git/' \
             -e "ssh -p $SSH_PORT" \
-            source/backend/ "$SSH_USER@$SSH_HOST:$BACKEND_PATH/"
+            impactos-backend/ "$SSH_USER@$SSH_HOST:$BACKEND_PATH/"
 
       - name: Run backend migrations
         env:
           SSH_HOST: ${{ secrets.SSH_HOST }}
           SSH_USER: ${{ secrets.SSH_USER }}
-          SSH_PORT: ${{ secrets.SSH_PORT }}
+          SSH_PORT: ${{ secrets.SSH_PORT || '22' }}
           BACKEND_PATH: ${{ secrets.BACKEND_STAGING_PATH }}
         run: |
           ssh -p "$SSH_PORT" "$SSH_USER@$SSH_HOST" \
@@ -127,9 +129,9 @@ jobs:
         env:
           SSH_HOST: ${{ secrets.SSH_HOST }}
           SSH_USER: ${{ secrets.SSH_USER }}
-          SSH_PORT: ${{ secrets.SSH_PORT }}
+          SSH_PORT: ${{ secrets.SSH_PORT || '22' }}
           FRONTEND_PATH: ${{ secrets.FRONTEND_STAGING_PATH }}
         run: |
           rsync -az --delete \
             -e "ssh -p $SSH_PORT" \
-            source/frontend/dist/ "$SSH_USER@$SSH_HOST:$FRONTEND_PATH/"
+            impactos-frontend/dist/ "$SSH_USER@$SSH_HOST:$FRONTEND_PATH/"
