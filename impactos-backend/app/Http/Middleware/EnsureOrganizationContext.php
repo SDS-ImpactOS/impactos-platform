@@ -23,6 +23,7 @@ class EnsureOrganizationContext
 
         $isMember = $user->organizations()
             ->where('organizations.id', $organizationId)
+            ->where('organizations.status', 'active')
             ->wherePivot('status', 'active')
             ->exists();
 
